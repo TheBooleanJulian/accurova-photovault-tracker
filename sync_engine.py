@@ -376,11 +376,14 @@ def get_worksheet(sheet_id: str, oauth_client_secret_path: str, oauth_token_path
         if oauth_token_path and os.path.exists(oauth_token_path):
             with open(oauth_token_path, "r", encoding="utf-8") as f:
                 token_info = json.load(f)
+            if isinstance(token_info, str):  # earlier versions saved the token double-encoded
+                token_info = json.loads(token_info)
         client, token_info = gspread.oauth_from_dict(client_config, authorized_user_info=token_info)
         if oauth_token_path:
             os.makedirs(os.path.dirname(oauth_token_path), exist_ok=True)
             with open(oauth_token_path, "w", encoding="utf-8") as f:
-                json.dump(token_info, f)
+                # gspread hands back the token as a JSON string already
+                f.write(token_info if isinstance(token_info, str) else json.dumps(token_info))
     else:
         kwargs = {"credentials_filename": oauth_client_secret_path}
         if oauth_token_path:
@@ -400,6 +403,17 @@ COMBINE_COLUMNS = {"Remarks": " | ", "Tags": ", "}
 
 def _col_letter(index: int) -> str:
     return chr(ord("A") + index)  # sheet has < 26 columns
+
+
+def _parse_scanned(text: str) -> datetime:
+    """Parse a Last Scanned cell. Sheets drops the hour's leading zero ("2:34"), so text
+    comparison is wrong ("10:05" < "9:59"); unparseable values sort as oldest."""
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(text.strip(), fmt)
+        except ValueError:
+            pass
+    return datetime.min
 
 
 def plan_duplicate_cleanup(existing_values: list) -> list:
@@ -427,8 +441,8 @@ def plan_duplicate_cleanup(existing_values: list) -> list:
     for path, rows in groups.items():
         if len(rows) < 2:
             continue
-        # "%Y-%m-%d %H:%M" sorts correctly as text; newest first, lowest row breaks ties
-        rows.sort(key=lambda r: (r[1][scanned_col].strip(), -r[0]), reverse=True)
+        # newest first, lowest row breaks ties
+        rows.sort(key=lambda r: (_parse_scanned(r[1][scanned_col]), -r[0]), reverse=True)
         keep_row, keep_vals = rows[0]
         fills, conflicts = {}, {}
         for col in USER_COLUMNS:
@@ -538,12 +552,24 @@ def sync_to_sheet(worksheet, new_records: list, log=print, bulk_insert_threshold
     """
     existing_values = _with_retry(worksheet.get_all_values, log=log)
 
-    needs_full_init = (not existing_values) or (existing_values[0] != HEADERS)
-    if needs_full_init:
-        if existing_values:
-            log("Sheet header doesn't match the expected format - rebuilding once to normalize it.")
+    if not existing_values:
         _full_rewrite(worksheet, new_records, log)
         return
+
+    # Never wipe a sheet that already has data just because its header differs.
+    header = list(existing_values[0])
+    while header and not header[-1].strip():
+        header.pop()
+    if header != HEADERS:
+        if header == HEADERS[:len(header)]:
+            log("Sheet header is missing newer column(s) - adding them (no data is changed).")
+            _with_retry(worksheet.update, "A1", [HEADERS], value_input_option="USER_ENTERED", log=log)
+        else:
+            raise RuntimeError(
+                "The sheet's header row doesn't match what this app expects, so nothing was changed "
+                "(rewriting would erase Remarks and dashboard columns like Client / Workflow Status). "
+                f"Expected: {HEADERS}. Found: {header}. Fix the header row, or restore it from version history."
+            )
 
     existing_values = remove_duplicate_rows(worksheet, existing_values, log, confirm_merge)
 
