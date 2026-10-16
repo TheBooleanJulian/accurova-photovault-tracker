@@ -124,6 +124,7 @@ Further ideas (summary tab, standalone `.exe` build, CSV/Excel export, duplicate
 
 Versioned as `MAJOR.MINOR.PATCH`: **MAJOR** = a workflow or config-breaking change, **MINOR** = a new feature, **PATCH** = a bug fix with no new behavior.
 
+- **v1.10.0** — Sync now removes duplicate rows (same Full Path), keeping the most recently scanned copy
 - **v1.9.0** — Renamed to Accurova PhotoVault Tracker; OAuth client credentials now load from environment / `.env` first (JSON file is a fallback); added `run.bat` and an **Open Sheet** button
 - **v1.8.0** — Prepopulated RAW/Processed extension fields with common formats across camera brands by default
 - **v1.7.0** — Added moved/relocated folder detection

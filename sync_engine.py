@@ -377,6 +377,51 @@ def get_worksheet(sheet_id: str, oauth_client_secret_path: str, oauth_token_path
     return worksheet
 
 
+def find_duplicate_rows(existing_values: list) -> list:
+    """
+    Return 1-based sheet row numbers to delete: for each Full Path that appears on
+    more than one row, every row except the one with the newest Last Scanned
+    (ties keep the lowest row number). `existing_values` includes the header row.
+    """
+    path_col = HEADERS.index("Full Path")
+    scanned_col = HEADERS.index("Last Scanned")
+    groups = {}
+    for i, row in enumerate(existing_values[1:]):
+        padded = row + [""] * (len(HEADERS) - len(row))
+        path = padded[path_col].strip()
+        if path:
+            groups.setdefault(path, []).append((i + 2, padded[scanned_col].strip()))
+
+    to_delete = []
+    for rows in groups.values():
+        if len(rows) < 2:
+            continue
+        # "%Y-%m-%d %H:%M" sorts correctly as text; newest first, lowest row breaks ties
+        rows.sort(key=lambda r: (r[1], -r[0]), reverse=True)
+        to_delete.extend(row_number for row_number, _ in rows[1:])
+    return sorted(to_delete)
+
+
+def remove_duplicate_rows(worksheet, existing_values: list, log=print) -> list:
+    """Delete duplicate rows (oldest scans) in one API call; returns the refreshed sheet values."""
+    dupes = find_duplicate_rows(existing_values)
+    if not dupes:
+        return existing_values
+    log(f"Found {len(dupes)} duplicate row(s) (same Full Path) - removing the oldest-scanned copies: "
+        f"rows {', '.join(map(str, dupes))}.")
+    # Delete bottom-up so earlier deletions don't shift later row indexes.
+    requests = [{
+        "deleteDimension": {"range": {
+            "sheetId": worksheet.id,
+            "dimension": "ROWS",
+            "startIndex": row_number - 1,
+            "endIndex": row_number,
+        }}
+    } for row_number in reversed(dupes)]
+    _with_retry(worksheet.spreadsheet.batch_update, {"requests": requests}, log=log)
+    return _with_retry(worksheet.get_all_values, log=log)
+
+
 def sync_to_sheet(worksheet, new_records: list, log=print, bulk_insert_threshold: int = 25) -> None:
     """
     Incrementally sync new_records into the sheet:
@@ -396,6 +441,8 @@ def sync_to_sheet(worksheet, new_records: list, log=print, bulk_insert_threshold
       - The Remarks column (far right) is never overwritten with blank text
         after its row is first created, so anything you type there is always
         preserved - including across a bulk rewrite.
+      - Duplicate rows (same Full Path) are removed first, keeping the copy with
+        the newest Last Scanned.
       - Transient/quota (429/5xx) errors from the Sheets API are retried
         automatically with exponential backoff.
     """
@@ -407,6 +454,8 @@ def sync_to_sheet(worksheet, new_records: list, log=print, bulk_insert_threshold
             log("Sheet header doesn't match the expected format - rebuilding once to normalize it.")
         _full_rewrite(worksheet, new_records, log)
         return
+
+    existing_values = remove_duplicate_rows(worksheet, existing_values, log)
 
     # Map existing sheet rows (by Full Path) to their row number + parsed record + remarks.
     remarks_col = HEADERS.index("Remarks")
