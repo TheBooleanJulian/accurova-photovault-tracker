@@ -35,6 +35,7 @@ You can point the app at a year (or drive root) folder directly. If a subfolder 
 - Recursive container-folder detection — point it at a whole year or drive and it finds the shoot folders itself
 - Google Sheets sync with a clickable `HYPERLINK("file:///...")` Full Path column
 - Newest-shoot-first sorting, with a preserved manual `Remarks` column
+- Preserves six more manually-managed columns (`Workflow Status`, `Client`, `Type`, `Priority`, `Tags`, `Client Token`) across rewrites — these are owned by the [Accurova Workflow Dashboard](../accurova-workflow-dashboard) when both apps share a sheet; this script never reads or computes them, only carries them through untouched
 - Moved/relocated folder detection — updates the existing row in place instead of creating an orphan + duplicate
 - Incremental sync — unchanged rows untouched, changed rows updated in place, new folders inserted at the correct position
 - Local scan cache written before every Sheets sync, so a failed sync never loses data, plus a "Retry Last Sync" button

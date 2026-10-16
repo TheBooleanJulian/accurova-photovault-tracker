@@ -37,7 +37,21 @@ HEADERS = [
     "Last Scanned",
     "Status Icon",
     "Remarks",
+    # Columns owned by the Workflow Dashboard, not this script. Never read for
+    # change detection and always carried through untouched on a rewrite —
+    # same treatment as "Remarks" above, just for more columns. "Status" above
+    # is this script's own computed processing state; "Workflow Status" is the
+    # dashboard's separate human-set field, named differently so the two don't
+    # overwrite each other when both apps point at the same sheet.
+    "Workflow Status",
+    "Client",
+    "Type",
+    "Priority",
+    "Tags",
+    "Client Token",
 ]
+
+DASHBOARD_COLUMNS = ["Workflow Status", "Client", "Type", "Priority", "Tags", "Client Token"]
 
 DATE_PATTERN = re.compile(r"^(\d{4})_(\d{2})_(\d{2})[\s_\-]*(.*)$")
 
@@ -408,8 +422,10 @@ def sync_to_sheet(worksheet, new_records: list, log=print, bulk_insert_threshold
         _full_rewrite(worksheet, new_records, log)
         return
 
-    # Map existing sheet rows (by Full Path) to their row number + parsed record + remarks.
+    # Map existing sheet rows (by Full Path) to their row number + parsed record +
+    # remarks + dashboard-owned columns (Workflow Status, Client, Type, Priority, Tags).
     remarks_col = HEADERS.index("Remarks")
+    dashboard_cols = [HEADERS.index(c) for c in DASHBOARD_COLUMNS]
     existing_by_key = {}
     for i, row_values in enumerate(existing_values[1:]):
         row_number = i + 2  # header is row 1
@@ -423,6 +439,7 @@ def sync_to_sheet(worksheet, new_records: list, log=print, bulk_insert_threshold
                 "row_number": row_number,
                 "record": rec,
                 "remarks": padded[remarks_col],
+                "dashboard_values": [padded[i] for i in dashboard_cols],
             }
 
     # --- Step 1: update rows whose data actually changed, in place ---
@@ -473,7 +490,8 @@ def sync_to_sheet(worksheet, new_records: list, log=print, bulk_insert_threshold
         icon_formula = _status_icon_formula(target_row)
         _with_retry(
             worksheet.insert_rows,
-            [_record_to_row(rec) + [icon_formula, ""]],  # trailing "" = blank Remarks cell
+            # trailing "" = blank Remarks cell, then blank dashboard-owned columns (new row, nothing to preserve yet)
+            [_record_to_row(rec) + [icon_formula, ""] + [""] * len(DASHBOARD_COLUMNS)],
             row=target_row,
             value_input_option="USER_ENTERED",
             log=log,
@@ -489,16 +507,21 @@ def sync_to_sheet(worksheet, new_records: list, log=print, bulk_insert_threshold
 def _bulk_rewrite_preserving_remarks(worksheet, existing_by_key: dict, new_only: list, log=print) -> int:
     """
     Rewrite the whole sheet in one shot (used for large batches of new folders),
-    while preserving every existing row's Remarks text exactly as-is.
+    while preserving every existing row's Remarks text and dashboard-owned
+    columns (Workflow Status, Client, Type, Priority, Tags) exactly as-is.
     """
-    combined = [(info["record"], info.get("remarks", "")) for info in existing_by_key.values()]
-    combined.extend((rec, "") for rec in new_only)
-    combined.sort(key=lambda pair: _sort_key(pair[0]))
+    blank_dashboard_values = [""] * len(DASHBOARD_COLUMNS)
+    combined = [
+        (info["record"], info.get("remarks", ""), info.get("dashboard_values", blank_dashboard_values))
+        for info in existing_by_key.values()
+    ]
+    combined.extend((rec, "", blank_dashboard_values) for rec in new_only)
+    combined.sort(key=lambda triple: _sort_key(triple[0]))
 
     rows = [HEADERS]
-    for i, (rec, remarks) in enumerate(combined):
+    for i, (rec, remarks, dashboard_values) in enumerate(combined):
         row_number = i + 2
-        rows.append(_record_to_row(rec) + [_status_icon_formula(row_number), remarks])
+        rows.append(_record_to_row(rec) + [_status_icon_formula(row_number), remarks] + dashboard_values)
 
     _with_retry(worksheet.clear, log=log)
     _with_retry(worksheet.update, "A1", rows, value_input_option="USER_ENTERED", log=log)
@@ -511,7 +534,7 @@ def _full_rewrite(worksheet, new_records: list, log=print) -> None:
     rows = [HEADERS]
     for i, rec in enumerate(final_records):
         row_number = i + 2
-        rows.append(_record_to_row(rec) + [_status_icon_formula(row_number), ""])
+        rows.append(_record_to_row(rec) + [_status_icon_formula(row_number), ""] + [""] * len(DASHBOARD_COLUMNS))
     _with_retry(worksheet.clear, log=log)
     _with_retry(worksheet.update, "A1", rows, value_input_option="USER_ENTERED", log=log)
     log(f"Initialized sheet with {len(final_records)} row(s).")
