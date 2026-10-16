@@ -391,11 +391,28 @@ def get_worksheet(sheet_id: str, oauth_client_secret_path: str, oauth_token_path
     return worksheet
 
 
-def find_duplicate_rows(existing_values: list) -> list:
+# Hand-entered columns that duplicate rows can disagree on. Free-text ones are
+# combined on merge; single-valued ones (stage, client, token...) keep the newest
+# row's value, since joining e.g. two Client Tokens would break the dashboard's links.
+USER_COLUMNS = ["Remarks"] + DASHBOARD_COLUMNS
+COMBINE_COLUMNS = {"Remarks": " | ", "Tags": ", "}
+
+
+def _col_letter(index: int) -> str:
+    return chr(ord("A") + index)  # sheet has < 26 columns
+
+
+def plan_duplicate_cleanup(existing_values: list) -> list:
     """
-    Return 1-based sheet row numbers to delete: for each Full Path that appears on
-    more than one row, every row except the one with the newest Last Scanned
-    (ties keep the lowest row number). `existing_values` includes the header row.
+    Group rows sharing a Full Path (header row included in `existing_values`) and
+    decide what to do with each group. The row with the newest Last Scanned is kept
+    (ties keep the lowest row number); the others are dropped. Per group returns:
+      keep / drop      1-based sheet row numbers
+      name / path      for display
+      fills            {column: value} blank on the kept row but set on a dropped row
+                       (safe: nothing is overwritten)
+      conflicts        {column: [distinct non-blank values, newest row first]} where
+                       rows disagree - needs the user's OK before merging
     """
     path_col = HEADERS.index("Full Path")
     scanned_col = HEADERS.index("Last Scanned")
@@ -404,25 +421,81 @@ def find_duplicate_rows(existing_values: list) -> list:
         padded = row + [""] * (len(HEADERS) - len(row))
         path = padded[path_col].strip()
         if path:
-            groups.setdefault(path, []).append((i + 2, padded[scanned_col].strip()))
+            groups.setdefault(path, []).append((i + 2, padded))
 
-    to_delete = []
-    for rows in groups.values():
+    plans = []
+    for path, rows in groups.items():
         if len(rows) < 2:
             continue
         # "%Y-%m-%d %H:%M" sorts correctly as text; newest first, lowest row breaks ties
-        rows.sort(key=lambda r: (r[1], -r[0]), reverse=True)
-        to_delete.extend(row_number for row_number, _ in rows[1:])
-    return sorted(to_delete)
+        rows.sort(key=lambda r: (r[1][scanned_col].strip(), -r[0]), reverse=True)
+        keep_row, keep_vals = rows[0]
+        fills, conflicts = {}, {}
+        for col in USER_COLUMNS:
+            idx = HEADERS.index(col)
+            distinct = []
+            for _, vals in rows:
+                v = vals[idx].strip()
+                if v and v not in distinct:
+                    distinct.append(v)
+            if len(distinct) > 1:
+                conflicts[col] = distinct
+            elif distinct and not keep_vals[idx].strip():
+                fills[col] = distinct[0]
+        plans.append({
+            "keep": keep_row,
+            "drop": sorted(r[0] for r in rows[1:]),
+            "name": keep_vals[HEADERS.index("Photoshoot Name")],
+            "path": path,
+            "fills": fills,
+            "conflicts": conflicts,
+        })
+    return plans
 
 
-def remove_duplicate_rows(worksheet, existing_values: list, log=print) -> list:
-    """Delete duplicate rows (oldest scans) in one API call; returns the refreshed sheet values."""
-    dupes = find_duplicate_rows(existing_values)
-    if not dupes:
+def _merged_value(col: str, values: list) -> str:
+    if col in COMBINE_COLUMNS:
+        return COMBINE_COLUMNS[col].join(values)
+    return values[0]  # newest row's value wins
+
+
+def remove_duplicate_rows(worksheet, existing_values: list, log=print, confirm_merge=None) -> list:
+    """
+    Delete duplicate rows (oldest scans), in one API call. Blank cells on the kept
+    row are filled from the dropped rows first. If duplicates hold *different*
+    hand-entered values, `confirm_merge(conflicting_plans)` is asked once; if it is
+    missing or returns False those duplicates are left untouched. Returns the
+    refreshed sheet values.
+    """
+    plans = plan_duplicate_cleanup(existing_values)
+    if not plans:
         return existing_values
-    log(f"Found {len(dupes)} duplicate row(s) (same Full Path) - removing the oldest-scanned copies: "
-        f"rows {', '.join(map(str, dupes))}.")
+
+    conflicting = [p for p in plans if p["conflicts"]]
+    approved = bool(conflicting) and confirm_merge is not None and confirm_merge(conflicting)
+    if conflicting and not approved:
+        rows = [str(r) for p in conflicting for r in [p["keep"]] + p["drop"]]
+        log(f"{len(conflicting)} duplicate group(s) have differing notes/dashboard values - "
+            f"left untouched (rows: {', '.join(rows)}).")
+    plans = [p for p in plans if not p["conflicts"] or approved]
+    if not plans:
+        return existing_values
+
+    updates, to_delete = [], []
+    for p in plans:
+        cells = dict(p["fills"])
+        for col, values in p["conflicts"].items():
+            cells[col] = _merged_value(col, values)
+        for col, value in cells.items():
+            cell = f"{_col_letter(HEADERS.index(col))}{p['keep']}"
+            updates.append({"range": cell, "values": [[value]]})
+        to_delete.extend(p["drop"])
+    to_delete.sort()
+
+    log(f"Removing {len(to_delete)} duplicate row(s) (same Full Path), keeping the newest scan: "
+        f"rows {', '.join(map(str, to_delete))}.")
+    if updates:
+        _with_retry(worksheet.batch_update, updates, value_input_option="USER_ENTERED", log=log)
     # Delete bottom-up so earlier deletions don't shift later row indexes.
     requests = [{
         "deleteDimension": {"range": {
@@ -431,12 +504,13 @@ def remove_duplicate_rows(worksheet, existing_values: list, log=print) -> list:
             "startIndex": row_number - 1,
             "endIndex": row_number,
         }}
-    } for row_number in reversed(dupes)]
+    } for row_number in reversed(to_delete)]
     _with_retry(worksheet.spreadsheet.batch_update, {"requests": requests}, log=log)
     return _with_retry(worksheet.get_all_values, log=log)
 
 
-def sync_to_sheet(worksheet, new_records: list, log=print, bulk_insert_threshold: int = 25) -> None:
+def sync_to_sheet(worksheet, new_records: list, log=print, bulk_insert_threshold: int = 25,
+                  confirm_merge=None) -> None:
     """
     Incrementally sync new_records into the sheet:
       - Rows whose data hasn't changed are left completely untouched (not
@@ -456,7 +530,9 @@ def sync_to_sheet(worksheet, new_records: list, log=print, bulk_insert_threshold
         after its row is first created, so anything you type there is always
         preserved - including across a bulk rewrite.
       - Duplicate rows (same Full Path) are removed first, keeping the copy with
-        the newest Last Scanned.
+        the newest Last Scanned. If duplicates hold different Remarks/dashboard
+        values, `confirm_merge(plans)` must approve merging them (else they're
+        left alone).
       - Transient/quota (429/5xx) errors from the Sheets API are retried
         automatically with exponential backoff.
     """
@@ -469,7 +545,7 @@ def sync_to_sheet(worksheet, new_records: list, log=print, bulk_insert_threshold
         _full_rewrite(worksheet, new_records, log)
         return
 
-    existing_values = remove_duplicate_rows(worksheet, existing_values, log)
+    existing_values = remove_duplicate_rows(worksheet, existing_values, log, confirm_merge)
 
     # Map existing sheet rows (by Full Path) to their row number + parsed record +
     # remarks + dashboard-owned columns (Workflow Status, Client, Type, Priority, Tags).
@@ -592,7 +668,8 @@ def _full_rewrite(worksheet, new_records: list, log=print) -> None:
 def run_full_sync(root_folders: list, sheet_id: str, oauth_client_secret_path: str,
                    raw_exts: list, processed_exts: list,
                    threshold_pct: float = 90, log=print,
-                   oauth_token_path: str = None, scan_cache_path: str = None) -> None:
+                   oauth_token_path: str = None, scan_cache_path: str = None,
+                   confirm_merge=None) -> None:
     """
     Scan everything, cache the results to local disk (so a failed/slow Sheets
     sync never loses the scan), then push to the sheet.
@@ -611,11 +688,11 @@ def run_full_sync(root_folders: list, sheet_id: str, oauth_client_secret_path: s
     log("Connecting to Google Sheets...")
     log("(First run will open a browser window to sign in and authorize access.)")
     worksheet = get_worksheet(sheet_id, oauth_client_secret_path, oauth_token_path)
-    sync_to_sheet(worksheet, records, log)
+    sync_to_sheet(worksheet, records, log, confirm_merge=confirm_merge)
 
 
 def sync_cached_scan(sheet_id: str, oauth_client_secret_path: str, scan_cache_path: str,
-                      log=print, oauth_token_path: str = None) -> None:
+                      log=print, oauth_token_path: str = None, confirm_merge=None) -> None:
     """
     Retry syncing the most recently cached scan without re-scanning the
     filesystem - use this after a sync failure (e.g. a quota error) so you
@@ -628,7 +705,7 @@ def sync_cached_scan(sheet_id: str, oauth_client_secret_path: str, scan_cache_pa
     log(f"Loaded {len(records)} cached photoshoot record(s) from {scan_cache_path}.")
     log("Connecting to Google Sheets...")
     worksheet = get_worksheet(sheet_id, oauth_client_secret_path, oauth_token_path)
-    sync_to_sheet(worksheet, records, log)
+    sync_to_sheet(worksheet, records, log, confirm_merge=confirm_merge)
 
 
 if __name__ == "__main__":

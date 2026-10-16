@@ -18,3 +18,13 @@ deliberately a different column from the dashboard's `Workflow Status`
 (human-set, e.g. `Editing`/`Delivered`). They used to share the name
 `Status`, which meant a scan would silently clobber whatever stage was set
 on the dashboard. Don't reuse `Status` for anything dashboard-facing.
+
+## Duplicate-row cleanup is the one place this script touches those columns
+`remove_duplicate_rows` (called at the start of every `sync_to_sheet`) deletes
+rows sharing a Full Path, keeping the newest `Last Scanned`. Where dropped
+rows hold `Remarks` / dashboard values, blanks on the kept row are filled
+silently; genuine disagreements only merge after the UI's `confirm_merge`
+prompt says yes (headless `python sync_engine.py` never merges, it just logs
+and leaves them). On merge, only `Remarks`/`Tags` are concatenated — never
+`Client Token` or other single-valued columns (joining would break the
+dashboard's private links), those keep the newest row's value.
