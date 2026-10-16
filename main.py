@@ -225,6 +225,7 @@ class PhotoVaultTrackerApp:
                 log=self._log,
                 oauth_token_path=settings["oauth_token_path"],
                 scan_cache_path=settings["scan_cache_path"],
+                confirm_merge=self._confirm_merge,
             )
             self._log("Sync complete. Google Sheet is up to date.")
         except Exception as exc:  # noqa: BLE001 - surface any error to the log/user
@@ -235,6 +236,33 @@ class PhotoVaultTrackerApp:
         finally:
             self.scan_button.config(state="normal")
             self.retry_button.config(state="normal")
+
+    def _confirm_merge(self, plans):
+        """Called from the sync thread: ask on the UI thread whether to merge differing duplicates."""
+        lines = []
+        for p in plans[:6]:
+            lines.append(f"- {p['name']} (rows {p['keep']}, {', '.join(map(str, p['drop']))})")
+            for col, values in p["conflicts"].items():
+                lines.append(f"    {col}: " + "  vs  ".join(f'"{v}"' for v in values))
+        if len(plans) > 6:
+            lines.append(f"...and {len(plans) - 6} more")
+        text = (
+            f"{len(plans)} duplicate shoot(s) have different notes / dashboard values:\n\n"
+            + "\n".join(lines)
+            + "\n\nYes = keep the newest row, combine Remarks/Tags from the older rows, and for "
+            "other columns keep the newest row's value. The older rows are then deleted.\n"
+            "No = leave these duplicates untouched."
+        )
+        answer = {}
+        done = threading.Event()
+
+        def ask():
+            answer["ok"] = messagebox.askyesno("Merge duplicate rows?", text)
+            done.set()
+
+        self.root.after(0, ask)
+        done.wait()
+        return answer["ok"]
 
     def _run_retry_thread(self):
         settings = self._gather_settings()
@@ -265,6 +293,7 @@ class PhotoVaultTrackerApp:
                 settings["scan_cache_path"],
                 log=self._log,
                 oauth_token_path=settings["oauth_token_path"],
+                confirm_merge=self._confirm_merge,
             )
             self._log("Retry sync complete. Google Sheet is up to date.")
         except Exception as exc:  # noqa: BLE001
