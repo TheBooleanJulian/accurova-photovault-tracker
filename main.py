@@ -16,10 +16,11 @@ import re
 import threading
 import webbrowser
 import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext, ttk
+from tkinter import filedialog, scrolledtext, ttk
 
 import config_manager
 import sync_engine
+import theme
 
 SHEET_ID_PATTERN = re.compile(r"/spreadsheets/d/([a-zA-Z0-9_-]+)")
 
@@ -48,10 +49,11 @@ class PhotoVaultTrackerApp:
         pad = {"padx": 10, "pady": 6}
 
         # --- Root folders ---
-        folders_frame = ttk.LabelFrame(self.root, text="Root Folders to Scan")
+        folders_frame = ttk.LabelFrame(self.root, text="ROOT FOLDERS TO SCAN")
         folders_frame.pack(fill="x", **pad)
 
         self.folders_listbox = tk.Listbox(folders_frame, height=5, selectmode="extended")
+        theme.style_listbox(self.folders_listbox)
         self.folders_listbox.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=10)
 
         scrollbar = ttk.Scrollbar(folders_frame, orient="vertical", command=self.folders_listbox.yview)
@@ -64,7 +66,7 @@ class PhotoVaultTrackerApp:
         ttk.Button(btns_frame, text="Remove Selected", command=self._remove_folder).pack(fill="x", pady=2)
 
         # --- Google Sheet settings ---
-        sheet_frame = ttk.LabelFrame(self.root, text="Google Sheet")
+        sheet_frame = ttk.LabelFrame(self.root, text="GOOGLE SHEET")
         sheet_frame.pack(fill="x", **pad)
 
         ttk.Label(sheet_frame, text="Sheet ID or URL:").grid(row=0, column=0, sticky="w", padx=10, pady=6)
@@ -80,14 +82,13 @@ class PhotoVaultTrackerApp:
         ttk.Label(
             sheet_frame,
             text="First sync opens a browser to sign in with your Google account - no service account needed.",
-            foreground="#666666",
-            font=("TkDefaultFont", 8),
+            style="Hint.TLabel",
         ).grid(row=2, column=0, columnspan=3, sticky="w", padx=10, pady=(0, 6))
 
         sheet_frame.columnconfigure(1, weight=1)
 
         # --- Options ---
-        options_frame = ttk.LabelFrame(self.root, text="Options")
+        options_frame = ttk.LabelFrame(self.root, text="OPTIONS")
         options_frame.pack(fill="x", **pad)
 
         ttk.Label(options_frame, text="RAW extensions (comma-separated):").grid(row=0, column=0, sticky="w", padx=10, pady=6)
@@ -106,18 +107,33 @@ class PhotoVaultTrackerApp:
         actions_frame = ttk.Frame(self.root)
         actions_frame.pack(fill="x", **pad)
         ttk.Button(actions_frame, text="Save Settings", command=self._save_config).pack(side="left", padx=(0, 8))
-        self.scan_button = ttk.Button(actions_frame, text="Scan & Sync Now", command=self._run_scan_thread)
+        self.scan_button = ttk.Button(actions_frame, text="Scan & Sync Now", command=self._run_scan_thread, style="Primary.TButton")
         self.scan_button.pack(side="left", padx=(0, 8))
         self.retry_button = ttk.Button(actions_frame, text="Retry Last Sync (no rescan)", command=self._run_retry_thread)
         self.retry_button.pack(side="left")
 
         # --- Log ---
-        log_frame = ttk.LabelFrame(self.root, text="Log")
+        log_frame = ttk.LabelFrame(self.root, text="LOG")
         log_frame.pack(fill="both", expand=True, **pad)
         self.log_box = scrolledtext.ScrolledText(log_frame, height=14, state="disabled", wrap="word")
+        theme.style_text(self.log_box)
         self.log_box.pack(fill="both", expand=True, padx=10, pady=10)
 
     # ----------------------------------------------------------- helpers --
+    def _dialog(self, kind, title, message, buttons=("OK",)):
+        """Branded modal dialog; safe to call from the sync thread (runs on the UI thread)."""
+        if threading.current_thread() is threading.main_thread():
+            return theme.show_dialog(self.root, title, message, kind, buttons)
+        answer, done = {}, threading.Event()
+
+        def ask():
+            answer["value"] = theme.show_dialog(self.root, title, message, kind, buttons)
+            done.set()
+
+        self.root.after(0, ask)
+        done.wait()
+        return answer["value"]
+
     def _load_config_into_ui(self):
         for folder in self.config["root_folders"]:
             self.folders_listbox.insert("end", folder)
@@ -141,7 +157,7 @@ class PhotoVaultTrackerApp:
     def _open_sheet(self):
         sheet_id = extract_sheet_id(self.sheet_id_var.get())
         if not sheet_id:
-            messagebox.showwarning("Missing Sheet ID", "Enter a Google Sheet ID or URL first.")
+            self._dialog("warning", "Missing Sheet ID", "Enter a Google Sheet ID or URL first.")
             return
         webbrowser.open(f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit")
 
@@ -155,7 +171,7 @@ class PhotoVaultTrackerApp:
 
     def _log(self, message: str):
         self.log_box.config(state="normal")
-        self.log_box.insert("end", message + "\n")
+        self.log_box.insert("end", message + "\n", "error" if message.startswith("ERROR") else ())
         self.log_box.see("end")
         self.log_box.config(state="disabled")
         self.log_box.update_idletasks()
@@ -185,20 +201,20 @@ class PhotoVaultTrackerApp:
         settings = self._gather_settings()
         config_manager.save_config(settings)
         self.config = settings
-        messagebox.showinfo("Saved", "Settings saved.")
+        self._dialog("success", "Saved", "Settings saved.")
 
     # -------------------------------------------------------------- run --
     def _run_scan_thread(self):
         settings = self._gather_settings()
 
         if not settings["root_folders"]:
-            messagebox.showwarning("Missing folders", "Add at least one root folder to scan.")
+            self._dialog("warning", "Missing folders", "Add at least one root folder to scan.")
             return
         if not settings["sheet_id"]:
-            messagebox.showwarning("Missing Sheet ID", "Enter a Google Sheet ID or URL.")
+            self._dialog("warning", "Missing Sheet ID", "Enter a Google Sheet ID or URL.")
             return
         if not settings["oauth_client_secret_path"] and not config_manager.env_credentials_available():
-            messagebox.showwarning("Missing credentials", "Set GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET in .env, or select your OAuth Client Secret JSON file.")
+            self._dialog("warning", "Missing credentials", "Set GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET in .env, or select your OAuth Client Secret JSON file.")
             return
 
         # Persist settings for next time
@@ -232,7 +248,7 @@ class PhotoVaultTrackerApp:
             self._log(f"ERROR: {exc}")
             self._log("Your scan results were cached locally before this error, if it got that far - "
                        "use 'Retry Last Sync' to push them without re-scanning your drives.")
-            messagebox.showerror("Sync failed", str(exc))
+            self._dialog("error", "Sync failed", str(exc))
         finally:
             self.scan_button.config(state="normal")
             self.retry_button.config(state="normal")
@@ -257,7 +273,7 @@ class PhotoVaultTrackerApp:
         done = threading.Event()
 
         def ask():
-            answer["ok"] = messagebox.askyesno("Merge duplicate rows?", text)
+            answer["ok"] = self._dialog("question", "Merge duplicate rows?", text, ("Yes", "No")) == "Yes"
             done.set()
 
         self.root.after(0, ask)
@@ -268,10 +284,10 @@ class PhotoVaultTrackerApp:
         settings = self._gather_settings()
 
         if not settings["sheet_id"]:
-            messagebox.showwarning("Missing Sheet ID", "Enter a Google Sheet ID or URL.")
+            self._dialog("warning", "Missing Sheet ID", "Enter a Google Sheet ID or URL.")
             return
         if not settings["oauth_client_secret_path"] and not config_manager.env_credentials_available():
-            messagebox.showwarning("Missing credentials", "Set GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET in .env, or select your OAuth Client Secret JSON file.")
+            self._dialog("warning", "Missing credentials", "Set GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET in .env, or select your OAuth Client Secret JSON file.")
             return
 
         config_manager.save_config(settings)
@@ -298,7 +314,7 @@ class PhotoVaultTrackerApp:
             self._log("Retry sync complete. Google Sheet is up to date.")
         except Exception as exc:  # noqa: BLE001
             self._log(f"ERROR: {exc}")
-            messagebox.showerror("Retry failed", str(exc))
+            self._dialog("error", "Retry failed", str(exc))
         finally:
             self.scan_button.config(state="normal")
             self.retry_button.config(state="normal")
@@ -306,12 +322,7 @@ class PhotoVaultTrackerApp:
 
 def main():
     root = tk.Tk()
-    try:
-        style = ttk.Style()
-        if "clam" in style.theme_names():
-            style.theme_use("clam")
-    except tk.TclError:
-        pass
+    theme.apply(root)
     app = PhotoVaultTrackerApp(root)
     root.mainloop()
 

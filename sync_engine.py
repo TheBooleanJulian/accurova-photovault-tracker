@@ -565,10 +565,17 @@ def sync_to_sheet(worksheet, new_records: list, log=print, bulk_insert_threshold
             log("Sheet header is missing newer column(s) - adding them (no data is changed).")
             _with_retry(worksheet.update, "A1", [HEADERS], value_input_option="USER_ENTERED", log=log)
         else:
+            if sorted(header) == sorted(HEADERS):
+                problem = "The columns are all there but in a different order - move them back into the expected order."
+            else:
+                missing = [h for h in HEADERS if h not in header]
+                extra = [h for h in header if h not in HEADERS]
+                problem = f"Missing: {missing or 'none'}. Unexpected: {extra or 'none'}."
             raise RuntimeError(
                 "The sheet's header row doesn't match what this app expects, so nothing was changed "
                 "(rewriting would erase Remarks and dashboard columns like Client / Workflow Status). "
-                f"Expected: {HEADERS}. Found: {header}. Fix the header row, or restore it from version history."
+                f"{problem}\n\nExpected: {HEADERS}\n\nFound: {header}\n\n"
+                "Fix the header row, or restore it from version history."
             )
 
     existing_values = remove_duplicate_rows(worksheet, existing_values, log, confirm_merge)
