@@ -3,7 +3,7 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from sync_engine import HEADERS, plan_duplicate_cleanup, remove_duplicate_rows
+from sync_engine import HEADERS, plan_duplicate_cleanup, remove_duplicate_rows, sync_to_sheet
 
 
 def row(path, scanned, **cols):
@@ -49,6 +49,11 @@ class PlanTest(unittest.TestCase):
                 row("a", "2026-03-01 10:00"), row("a", "2026-01-15 10:00")]
         (plan,) = plan_duplicate_cleanup(vals)
         self.assertEqual((plan["keep"], plan["drop"]), (4, [2, 5]))
+
+    def test_hour_without_leading_zero_compares_by_time_not_text(self):
+        vals = [HEADERS, row("a", "2026-10-17 9:59"), row("a", "2026-10-17 10:05")]
+        (plan,) = plan_duplicate_cleanup(vals)
+        self.assertEqual((plan["keep"], plan["drop"]), (3, [2]))
 
     def test_tie_keeps_lowest_row(self):
         vals = [HEADERS, row("a", "2026-01-01 10:00"), row("a", "2026-01-01 10:00")]
@@ -114,6 +119,16 @@ class RemoveTest(unittest.TestCase):
                               confirm_merge=lambda plans: self.fail("should not ask"))
         self.assertEqual(len(ws.spreadsheet.requests), 1)
         self.assertEqual(ws.updates[0]["values"], [["note"]])
+
+
+class HeaderGuardTest(unittest.TestCase):
+    def test_mismatched_header_never_wipes_existing_data(self):
+        ws = FakeWorksheet([["Name", "Something else"], ["x", "y"]])
+        ws.cleared = False
+        ws.clear = lambda: setattr(ws, "cleared", True)
+        with self.assertRaises(RuntimeError):
+            sync_to_sheet(ws, [], log=lambda m: None)
+        self.assertFalse(ws.cleared)
 
 
 if __name__ == "__main__":
